@@ -180,8 +180,6 @@ class TimeDistributedTest(test.TestCase):
       # Assert that mean and variance changed.
       assert not np.array_equal(td.get_weights()[2], np.array([0, 0]))
       assert not np.array_equal(td.get_weights()[3], np.array([1, 1]))
-      # Verify input_map has one mapping from inputs to reshaped inputs.
-      self.assertEqual(len(td._input_map.keys()), 1)
 
   def test_TimeDistributed_trainable(self):
     # test layers that need learning_phase to be set

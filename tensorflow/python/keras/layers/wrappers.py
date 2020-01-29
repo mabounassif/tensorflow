@@ -50,10 +50,6 @@ class Wrapper(Layer):
   def __init__(self, layer, **kwargs):
     assert isinstance(layer, Layer)
     self.layer = layer
-    # Tracks mapping of Wrapper inputs to inner layer inputs. Useful when
-    # the inner layer has update ops that depend on its inputs (as opposed
-    # to the inputs to the Wrapper layer).
-    self._input_map = {}
     super(Wrapper, self).__init__(**kwargs)
 
   def build(self, input_shape=None):
@@ -238,25 +234,31 @@ class TimeDistributed(Wrapper):
       # No batch size specified, therefore the layer will be able
       # to process batches of any size.
       # We can go with reshape-based implementation for performance.
-      input_length = input_shape[1]
-      if not input_length:
-        input_length = array_ops.shape(inputs)[1]
-      inner_input_shape = self._get_shape_tuple((-1,), inputs, 2)
-      # Shape: (num_samples * timesteps, ...). And track the
-      # transformation in self._input_map.
-      input_uid = generic_utils.object_list_uid(inputs)
-      inputs = array_ops.reshape(inputs, inner_input_shape)
-      self._input_map[input_uid] = inputs
-      # (num_samples * timesteps, ...)
-      if generic_utils.has_arg(self.layer.call, 'mask') and mask is not None:
-        inner_mask_shape = self._get_shape_tuple((-1,), mask, 2)
-        kwargs['mask'] = K.reshape(mask, inner_mask_shape)
-      y = self.layer(inputs, **kwargs)
-      # Shape: (num_samples, timesteps, ...)
-      output_shape = self.compute_output_shape(input_shape).as_list()
-      output_shape = self._get_shape_tuple(
-          (-1, input_length), y, 1, output_shape[2:])
-      y = array_ops.reshape(y, output_shape)
+      if isinstance(inputs, ragged_tensor.RaggedTensor):
+        y = self.layer(inputs.values, **kwargs)
+        y = ragged_tensor.RaggedTensor.from_row_lengths(
+            y,
+            inputs.nested_row_lengths()[0])
+      else:
+        input_length = input_shape[1]
+        if not input_length:
+          input_length = array_ops.shape(inputs)[1]
+        inner_input_shape = self._get_shape_tuple((-1,), inputs, 2)
+        # Shape: (num_samples * timesteps, ...). And track the
+        # transformation in self._input_map.
+        inputs = array_ops.reshape(inputs, inner_input_shape)
+        # (num_samples * timesteps, ...)
+        if generic_utils.has_arg(self.layer.call, 'mask') and mask is not None:
+          inner_mask_shape = self._get_shape_tuple((-1,), mask, 2)
+          kwargs['mask'] = K.reshape(mask, inner_mask_shape)
+
+        y = self.layer(inputs, **kwargs)
+
+        # Shape: (num_samples, timesteps, ...)
+        output_shape = self.compute_output_shape(input_shape).as_list()
+        output_shape = self._get_shape_tuple((-1, input_length), y, 1,
+                                             output_shape[2:])
+        y = array_ops.reshape(y, output_shape)
 
     return y
 
@@ -298,15 +300,17 @@ class TimeDistributed(Wrapper):
     # cases need to call the layer.compute_mask when input_mask is None:
     # Masking layer and Embedding layer with mask_zero
     input_shape = K.int_shape(inputs)
-    if input_shape[0]:
-      # batch size matters, we currently do not handle mask explicitly
+    if input_shape[0] and not self._always_use_reshape or isinstance(
+        inputs, ragged_tensor.RaggedTensor):
+      # batch size matters, we currently do not handle mask explicitly, or if
+      # the layer always uses reshape approach, or the input is a ragged tensor.
       return mask
     inner_mask = mask
     if inner_mask is not None:
       inner_mask_shape = self._get_shape_tuple((-1,), mask, 2)
       inner_mask = K.reshape(inner_mask, inner_mask_shape)
-    input_uid = generic_utils.object_list_uid(inputs)
-    inner_inputs = self._input_map.get(input_uid, inputs)
+    inner_input_shape = self._get_shape_tuple((-1,), inputs, 2)
+    inner_inputs = array_ops.reshape(inputs, inner_input_shape)
     output_mask = self.layer.compute_mask(inner_inputs, inner_mask)
     if output_mask is None:
       if mask is None:
